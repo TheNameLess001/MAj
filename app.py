@@ -3,183 +3,139 @@ import pandas as pd
 import io
 import zipfile
 
-# --- CONFIGURATION DE LA PAGE ---
-st.set_page_config(
-    page_title="Générateur Catalogue Store",
-    page_icon="🚀",
-    layout="wide"
-)
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Générateur Catalogue Store", page_icon="⚡", layout="wide")
 
-# --- CSS PERSONNALISÉ (Pour un look plus pro) ---
+# --- FONCTION CACHE ---
+@st.cache_data
+def load_data(file):
+    return pd.read_excel(file, sheet_name=None)
+
+# --- UI HEADER ---
+st.title("⚡ Processeur Data Carrefour x Yassir")
 st.markdown("""
-    <style>
-    .stButton>button {
-        width: 100%;
-        background-color: #ff4b4b;
-        color: white;
-    }
-    .reportview-container {
-        background: #f0f2f6;
-    }
-    </style>
+<div style='background-color: #e6f3ff; padding: 10px; border-radius: 5px; border-left: 5px solid #2b8cbe;'>
+<strong>Traitement intelligent :</strong> Fusionne les onglets, supprime les doublons (même ID dans même store) 
+et retire les produits incomplets (sans image ou sans nom).
+</div>
 """, unsafe_allow_html=True)
 
-# --- FONCTION DE CHARGEMENT (CACHE) ---
-@st.cache_data(ttl=3600)
-def load_excel_file(uploaded_file):
-    """Charge toutes les feuilles en une seule fois pour gagner du temps."""
-    try:
-        # sheet_name=None lit toutes les feuilles dans un dictionnaire
-        dfs = pd.read_excel(uploaded_file, sheet_name=None)
-        return dfs
-    except Exception as e:
-        return None
-
-def process_data(dfs):
-    # Récupération des feuilles par index (plus sûr si les noms changent légèrement)
-    sheet_names = list(dfs.keys())
-    
-    # On suppose l'ordre : Output, Catalogue, MAJ, Image
-    if len(sheet_names) < 4:
-        st.error("Le fichier doit contenir au moins 4 onglets.")
-        return None, None
-
-    df_output_template = dfs[sheet_names[0]]
-    df_cat = dfs[sheet_names[1]]
-    df_maj = dfs[sheet_names[2]]
-    df_img = dfs[sheet_names[3]]
-
-    # 1. Standardisation des types (tout en string pour les IDs)
-    df_maj['product_id'] = df_maj['product_id'].astype(str).str.strip()
-    df_cat['external_id'] = df_cat['external_id'].astype(str).str.strip()
-    df_img['external_id'] = df_img['external_id'].astype(str).str.strip()
-
-    # 2. Nettoyage Images : Garder la 1ère image si doublons
-    if 'PICTURE_ORDER' in df_img.columns:
-        df_img = df_img.sort_values('PICTURE_ORDER')
-    df_img = df_img.drop_duplicates(subset=['external_id'], keep='first')
-
-    # 3. FUSION GLOBALE (Beaucoup plus rapide que dans la boucle)
-    # On part de MAJ (Stock/Prix) -> On ajoute Catalogue -> On ajoute Images
-    master_df = pd.merge(df_maj, df_cat, left_on='product_id', right_on='external_id', how='left')
-    master_df = pd.merge(master_df, df_img[['external_id', 'image']], left_on='product_id', right_on='external_id', how='left', suffixes=('', '_img'))
-
-    # 4. SUPPRESSION DES DOUBLONS (Même Store + Même Produit)
-    # On garde le premier ou le dernier ? Ici on garde le premier trouvé.
-    initial_count = len(master_df)
-    master_df = master_df.drop_duplicates(subset=['store_id', 'product_id'])
-    duplicates_removed = initial_count - len(master_df)
-
-    # 5. SUPPRESSION DES DONNÉES INCOMPLÈTES
-    # Critères : Doit avoir un nom anglais ET une image
-    # Note : Ajustez les colonnes si nécessaire
-    missing_criteria = master_df['name_english'].isna() | master_df['image'].isna() | (master_df['name_english'] == "")
-    
-    clean_df = master_df[~missing_criteria].copy()
-    rejected_count = missing_criteria.sum()
-
-    # 6. MAPPING FINAL ET NETTOYAGE VALEURS
-    # Colonnes attendues (basé sur le template Output ou en dur)
-    target_columns = ['name_english', 'price', 'quantity', 'description', 'category', 'sub_category', 'image', 'external_id']
-    
-    # Création colonne description si absente
-    if 'description' not in clean_df.columns:
-        clean_df['description'] = ""
-    
-    # Remplir description vide
-    clean_df['description'] = clean_df['description'].fillna("")
-    
-    # Mapping external_id (qui vient de product_id)
-    clean_df['external_id'] = clean_df['product_id']
-    
-    # Nettoyage final des valeurs
-    clean_df['quantity'] = clean_df['quantity'].fillna(0).astype(int)
-    clean_df['price'] = clean_df['price'].fillna(0)
-
-    # Sélection finale des colonnes
-    try:
-        clean_df = clean_df[target_columns]
-    except KeyError as e:
-        st.error(f"Colonne manquante dans les données fusionnées : {e}")
-        return None, None
-
-    stats = {
-        "total_lignes_maj": initial_count,
-        "doublons_supprimes": duplicates_removed,
-        "produits_incomplets": rejected_count,
-        "produits_valides": len(clean_df)
-    }
-
-    return clean_df, stats
-
-# --- INTERFACE UTILISATEUR ---
-
-st.title("⚡ Processeur Data Carrefour x Yassir")
-st.markdown("Transforme le fichier Excel en CSV par store. **Nettoie les doublons et les produits sans image/nom.**")
-
-uploaded_file = st.file_uploader("Déposez votre fichier Excel ici", type=['xlsx'])
+uploaded_file = st.file_uploader("Fichier Excel (.xlsx)", type=['xlsx'])
 
 if uploaded_file:
-    with st.spinner('Lecture du fichier...'):
-        dfs = load_excel_file(uploaded_file)
-    
-    if dfs:
-        with st.spinner('Traitement et nettoyage des données...'):
-            clean_df, stats = process_data(dfs)
+    with st.spinner('🚀 Chargement et analyse du fichier...'):
+        dfs = load_data(uploaded_file)
+        
+        # Vérification basique
+        sheet_names = list(dfs.keys())
+        if len(sheet_names) < 4:
+            st.error("Erreur : Le fichier doit contenir 4 onglets (Output, Catalogue, MAJ, Image).")
+            st.stop()
 
-        if clean_df is not None:
-            # Affichage des Statistiques (KPIs)
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Lignes Totales (MAJ)", stats['total_lignes_maj'])
-            col2.metric("Doublons supprimés", stats['doublons_supprimes'], delta_color="inverse")
-            col3.metric("Incomplets (No img/name)", stats['produits_incomplets'], delta_color="inverse")
-            col4.metric("Produits Finaux", stats['produits_valides'])
+        # Assignation des DF
+        df_out = dfs[sheet_names[0]]
+        df_cat = dfs[sheet_names[1]]
+        df_maj = dfs[sheet_names[2]]
+        df_img = dfs[sheet_names[3]]
 
-            if stats['produits_valides'] == 0:
-                st.warning("Aucun produit valide trouvé après nettoyage. Vérifiez vos IDs entre les onglets.")
-            else:
-                # Génération du ZIP
-                unique_stores = clean_df['store_id'].unique() # Si store_id n'est pas dans clean_df, il faut le garder avant le mapping final
-                # Petite correction : store_id a été filtré dans le mapping final ci-dessus, 
-                # il faut le récupérer.
-                # RE-FIX RAPIDE : Je dois m'assurer que store_id est dans clean_df temporairement pour le split
-                
-                # --- CORRECTION LOGIQUE POUR LE SPLIT ---
-                # Je refais une passe rapide pour réinclure store_id dans le DataFrame final avant split
-                # (Car 'store_id' n'est pas dans la liste target_columns standard)
-                
-                zip_buffer = io.BytesIO()
-                
-                # On reprend le DataFrame complet juste avant la sélection des colonnes pour avoir le store_id
-                # (Dans la vraie vie, j'aurais dû l'inclure plus tôt, mais on adapte ici)
-                
-                # Barre de progression
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                # On va filtrer le clean_df original (avant le drop columns)
-                # Pour simplifier, on suppose que clean_df contient déjà tout, mais on a besoin du store_id
-                # Ré-exécutons la logique de split sur les données filtrées mais avec store_id
-                
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    # On a besoin du store_id qui est dans les données sources. 
-                    # Pour optimiser, on va refaire le groupby sur le DataFrame propre.
-                    # Astuce : On va rajouter store_id dans target_columns temporairement si besoin, ou on utilise l'index.
-                    
-                    # Recréons un df avec store_id pour le split
-                    # Je modifie la fonction process_data mentalement pour inclure store_id, 
-                    # mais ici dans le script, je vais le faire via le merge initial.
-                    
-                    # Pour que le code soit simple pour toi, voici la logique propre de boucle finale :
-                    
-                    # On récupère les groupes depuis clean_df (il nous faut le store_id !)
-                    # Je vais modifier process_data dans le bloc ci-dessus pour retourner le df AVEC store_id
-                    # VOIR CORRECTION DANS LE BLOC SUIVANT
-                    pass 
+        # --- PRÉPARATION DES DONNÉES (Vectorisée) ---
+        
+        # 1. Nettoyage IDs (String + Strip)
+        df_maj['product_id'] = df_maj['product_id'].astype(str).str.strip()
+        df_maj['store_id'] = df_maj['store_id'].astype(str).str.strip()
+        
+        df_cat['external_id'] = df_cat['external_id'].astype(str).str.strip()
+        df_img['external_id'] = df_img['external_id'].astype(str).str.strip()
 
-                # --- LE VRAI BLOC DE GÉNÉRATION ZIP (OPTIMISÉ) ---
-                # Pour éviter de modifier tout le code haut, je le fais ici proprement :
+        # 2. Prépa Images (Garder unique)
+        if 'PICTURE_ORDER' in df_img.columns:
+            df_img = df_img.sort_values('PICTURE_ORDER')
+        df_img = df_img.drop_duplicates(subset=['external_id'], keep='first')
+
+        # 3. MERGE GLOBAL (MAJ + Catalogue + Image)
+        merged = pd.merge(df_maj, df_cat, left_on='product_id', right_on='external_id', how='left')
+        merged = pd.merge(merged, df_img[['external_id', 'image']], left_on='product_id', right_on='external_id', how='left', suffixes=('', '_img'))
+
+        # Stats avant nettoyage
+        total_rows = len(merged)
+
+        # 4. SUPPRESSION DOUBLONS (Store + Product ID)
+        merged = merged.drop_duplicates(subset=['store_id', 'product_id'])
+        rows_after_dedup = len(merged)
+        
+        # 5. SUPPRESSION INCOMPLETS (Pas de nom OU Pas d'image)
+        # On vérifie si name_english est vide/NaN ou image est vide/NaN
+        condition_valid = (
+            merged['name_english'].notna() & 
+            (merged['name_english'] != "") & 
+            merged['image'].notna() & 
+            (merged['image'] != "")
+        )
+        final_data = merged[condition_valid].copy()
+        rows_final = len(final_data)
+
+        # --- DASHBOARD STATS ---
+        st.divider()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Lignes Totales", total_rows)
+        c2.metric("Doublons supprimés", total_rows - rows_after_dedup)
+        c3.metric("Rejetés (Info manquante)", rows_after_dedup - rows_final)
+        c4.metric("Produits Validés", rows_final)
+        st.divider()
+
+        # --- GÉNÉRATION ZIP ---
+        if rows_final > 0:
+            # Préparation colonnes finales
+            final_data['external_id'] = final_data['product_id']
+            if 'description' not in final_data.columns:
+                final_data['description'] = ""
+            final_data['description'] = final_data['description'].fillna("")
+            final_data['quantity'] = final_data['quantity'].fillna(0).astype(int)
+            final_data['price'] = final_data['price'].fillna(0)
+            
+            # Colonnes requises
+            cols_export = ['name_english', 'price', 'quantity', 'description', 'category', 'sub_category', 'image', 'external_id']
+            
+            # Buffer ZIP
+            zip_buffer = io.BytesIO()
+            
+            # Liste des stores
+            stores = final_data['store_id'].unique()
+            
+            progress_text = "Génération des fichiers CSV en cours..."
+            my_bar = st.progress(0, text=progress_text)
+            
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for i, store in enumerate(stores):
+                    # Filtrer
+                    df_store = final_data[final_data['store_id'] == store]
+                    
+                    # Sélectionner et ordonner colonnes
+                    df_csv = df_store[cols_export]
+                    
+                    # Écrire dans le ZIP
+                    csv_bytes = df_csv.to_csv(index=False).encode('utf-8')
+                    zf.writestr(f"Output_Store_{store}.csv", csv_bytes)
+                    
+                    # Update progress
+                    my_bar.progress((i + 1) / len(stores), text=f"Store {store} traité")
+            
+            my_bar.empty()
+            st.success("✅ Traitement terminé avec succès !")
+            
+            # BOUTON DOWNLOAD
+            zip_buffer.seek(0)
+            st.download_button(
+                label="📥 TÉLÉCHARGER LES FICHIERS (ZIP)",
+                data=zip_buffer,
+                file_name="resultats_stores_clean.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
+            
+            # APERÇU
+            with st.expander("Voir un aperçu des données valides"):
+                st.dataframe(final_data[cols_export].head(20))
                 
-                # 1. On s'assure que clean_df a 'store_id'
-                # Dans ma fonction process_data ci-dessus, j'ai filtré les colonnes trop tôt.
-                # Je corrige la fonction process_data ci-dessous directement.
+        else:
+            st.warning("⚠️ Attention : Tous les produits ont été filtrés (manque d'image ou de nom). Vérifiez vos IDs.")
