@@ -4,12 +4,13 @@ import pandas as pd
 st.set_page_config(page_title="Assortiment vs MenuList Matcher", layout="wide")
 
 st.title("📦 Assortiment vs MenuList Matcher")
-st.markdown("Uploadez vos fichiers pour identifier les produits existants et manquants en fonction du **Store ID** choisi.")
+st.markdown("Uploadez vos fichiers pour identifier les produits existants et manquants en fonction du **Store ID** choisi, et enrichir les produits manquants avec leurs prix et quantités.")
 
 # Barre latérale pour l'upload des fichiers
 st.sidebar.header("1. Upload des Fichiers")
-assortiment_file = st.sidebar.file_uploader("Fichier Assortiment (CSV ou Excel)", type=['csv', 'xlsx'])
-menulist_file = st.sidebar.file_uploader("Fichier MenuList (CSV)", type=['csv'])
+assortiment_file = st.sidebar.file_uploader("1️⃣ Fichier Assortiment (CSV ou Excel)", type=['csv', 'xlsx'])
+menulist_file = st.sidebar.file_uploader("2️⃣ Fichier MenuList (CSV)", type=['csv'])
+pricing_file = st.sidebar.file_uploader("3️⃣ Fichier Prix & Quantités (Ex: invalid_rows.csv)", type=['csv'])
 
 # Variables globales pour le traitement
 df_assort = None
@@ -19,7 +20,6 @@ store_filter = None
 # Étape 1 : Lecture de l'assortiment et sélection du Store ID
 if assortiment_file:
     try:
-        # Lecture du fichier Assortiment
         if assortiment_file.name.endswith('.csv'):
             df_assort = pd.read_csv(assortiment_file)
         else:
@@ -30,24 +30,21 @@ if assortiment_file:
         
         st.sidebar.header("2. Choix du Magasin")
         if store_col:
-            # Récupérer les Store IDs uniques et nettoyer les données (enlever les valeurs nulles)
-            unique_stores = df_assort[store_col].dropna().astype(str).str.replace('\.0$', '', regex=True).unique().tolist()
-            unique_stores.sort() # Trier la liste pour faciliter la recherche
+            # Récupérer les Store IDs uniques et nettoyer
+            unique_stores = df_assort[store_col].dropna().astype(str).str.replace(r'\.0$', '', regex=True).unique().tolist()
+            unique_stores.sort()
             
-            # Créer un menu déroulant pour choisir le Store ID
             store_filter = st.sidebar.selectbox("Sélectionnez le Store ID :", unique_stores, index=unique_stores.index('170') if '170' in unique_stores else 0)
             st.sidebar.success(f"Colonne de magasin détectée : '{store_col}'")
         else:
-            # Fallback si aucune colonne de magasin n'est détectée
             store_filter = st.sidebar.text_input("Entrez le Store ID manuellement (ex: 170)", value="170")
             st.sidebar.warning("Aucune colonne 'store' ou 'magasin' détectée automatiquement.")
             
     except Exception as e:
         st.sidebar.error(f"Erreur lors de la lecture de l'assortiment : {e}")
 
-# Étape 2 : Traitement une fois les deux fichiers uploadés
+# Étape 2 : Traitement une fois les fichiers uploadés
 if df_assort is not None and menulist_file:
-    # Bouton pour lancer le traitement
     if st.sidebar.button("Lancer la correspondance 🚀"):
         with st.spinner('Traitement des données en cours...'):
             try:
@@ -56,29 +53,62 @@ if df_assort is not None and menulist_file:
                 
                 if 'external_id' in df_assort.columns and 'external_id' in df_menu.columns:
                     # Nettoyage des ID pour la jointure
-                    df_assort['external_id'] = df_assort['external_id'].astype(str).str.replace('\.0$', '', regex=True).str.strip()
-                    df_menu['external_id'] = df_menu['external_id'].astype(str).str.replace('\.0$', '', regex=True).str.strip()
+                    df_assort['external_id'] = df_assort['external_id'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                    df_menu['external_id'] = df_menu['external_id'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
                     
-                    # Filtrer l'assortiment par le Store ID choisi (si la colonne existe)
+                    # Filtrer l'assortiment par le Store ID
                     if store_col:
-                        df_assort_filtered = df_assort[df_assort[store_col].astype(str).str.replace('\.0$', '', regex=True) == str(store_filter)]
+                        df_assort_filtered = df_assort[df_assort[store_col].astype(str).str.replace(r'\.0$', '', regex=True) == str(store_filter)]
                     else:
-                        df_assort_filtered = df_assort # Pas de filtre possible
+                        df_assort_filtered = df_assort
                     
-                    # Conserver uniquement l'ID du produit de la MenuList
+                    # Jointure avec MenuList
                     menu_subset = df_menu[['external_id', 'food_id']].drop_duplicates(subset=['external_id'])
-                    
-                    # Jointure
                     merged = pd.merge(df_assort_filtered, menu_subset, on='external_id', how='left')
                     
-                    # Séparation : Existants (match) vs Non-Existants (pas de match)
-                    existing_products = merged[merged['food_id'].notna()]
-                    non_existing_products = merged[merged['food_id'].isna()]
+                    # Séparation
+                    existing_products = merged[merged['food_id'].notna()].copy()
+                    non_existing_products = merged[merged['food_id'].isna()].copy()
                     
+                    # --- Étape 3 : Enrichissement avec le 3ème fichier (Prix et Quantités) ---
+                    if pricing_file is not None:
+                        df_pricing = pd.read_csv(pricing_file)
+                        
+                        # Nettoyer l'ID produit du fichier de prix pour la correspondance
+                        if 'product_id' in df_pricing.columns:
+                            df_pricing['product_id'] = df_pricing['product_id'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                            
+                            # Filtrer le fichier de prix pour le Store ID sélectionné (si la colonne existe)
+                            if 'store_id' in df_pricing.columns and store_filter:
+                                df_pricing = df_pricing[df_pricing['store_id'].astype(str).str.replace(r'\.0$', '', regex=True) == str(store_filter)]
+                            
+                            # Conserver uniquement les colonnes utiles (on suppose 'price' et 'stock')
+                            cols_to_keep = ['product_id']
+                            if 'price' in df_pricing.columns: cols_to_keep.append('price')
+                            if 'stock' in df_pricing.columns: cols_to_keep.append('stock')
+                            
+                            pricing_subset = df_pricing[cols_to_keep].drop_duplicates(subset=['product_id'])
+                            
+                            # Fusionner avec les produits non-existants
+                            non_existing_products = pd.merge(
+                                non_existing_products, 
+                                pricing_subset, 
+                                left_on='external_id', 
+                                right_on='product_id', 
+                                how='left'
+                            )
+                            # Supprimer la colonne product_id en double après la fusion
+                            if 'product_id' in non_existing_products.columns:
+                                non_existing_products = non_existing_products.drop(columns=['product_id'])
+                                
+                            st.success(f"✅ Fichier Prix & Quantités intégré avec succès pour le Store {store_filter} !")
+                        else:
+                            st.warning("⚠️ La colonne 'product_id' n'a pas été trouvée dans le fichier Prix & Quantités. Enrichissement ignoré.")
+
                     # --- AFFICHAGE ---
                     st.success(f"✅ Traitement terminé pour le Store ID : {store_filter}")
                     
-                    tab1, tab2 = st.tabs(["✅ Produits Existants", "❌ Produits Non-Existants"])
+                    tab1, tab2 = st.tabs(["✅ Produits Existants", "❌ Produits Non-Existants (avec Prix/Stock)"])
                     
                     with tab1:
                         st.subheader(f"Produits trouvés dans la MenuList ({len(existing_products)} articles)")
@@ -100,9 +130,9 @@ if df_assort is not None and menulist_file:
                             mime="text/csv"
                         )
                 else:
-                    st.error("🚨 Erreur : Les deux fichiers doivent contenir la colonne `external_id`.")
+                    st.error("🚨 Erreur : Les fichiers Assortiment et MenuList doivent contenir la colonne `external_id`.")
                     
             except Exception as e:
                 st.error(f"Une erreur s'est produite lors du traitement : {e}")
 elif not assortiment_file or not menulist_file:
-    st.info("👈 Veuillez uploader vos deux fichiers dans la barre latérale, puis choisir votre Store ID.")
+    st.info("👈 Veuillez uploader vos fichiers dans la barre latérale, puis choisir votre Store ID.")
