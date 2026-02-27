@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 st.set_page_config(page_title="Assortiment vs MenuList Matcher", layout="wide")
 
 st.title("📦 Assortiment vs MenuList Matcher")
-st.markdown("Fichiers de sortie formatés exactement comme le modèle **MenuList**. Les images sont récupérées depuis la 2ème feuille de l'Assortiment.")
+st.markdown("Génère les Outputs avec suppression des lignes sans prix (Output 2), copie des noms (FR/AR), et suppression totale des doublons.")
 
 # --- BARRE LATÉRALE : UPLOADS ---
 st.sidebar.header("1. Upload des Fichiers")
@@ -28,6 +29,18 @@ if assortiment_file:
         # Lecture de la 1ère feuille (Catalogue)
         df_assort = pd.read_excel(assortiment_file, sheet_name=0)
         
+        # Dupliquer le name_english vers french et arabic directement dans l'assortiment s'il existe
+        name_col = next((col for col in df_assort.columns if 'name_english' in col.lower() or 'name' in col.lower()), None)
+        if name_col:
+            df_assort['name_english'] = df_assort[name_col]
+            df_assort['name_french'] = df_assort[name_col]
+            df_assort['name_arabic'] = df_assort[name_col]
+        
+        # Nettoyage initial et suppression des doublons dans le catalogue
+        if 'external_id' in df_assort.columns:
+            df_assort['external_id'] = clean_id(df_assort['external_id'])
+            df_assort = df_assort.drop_duplicates(subset=['external_id'])
+
         # Lecture de la 2ème feuille (Images)
         try:
             df_images = pd.read_excel(assortiment_file, sheet_name=1)
@@ -45,8 +58,8 @@ if assortiment_file:
 
             # Nettoyer et fusionner
             if 'external_id' in df_assort.columns and 'external_id' in df_images.columns:
-                df_assort['external_id'] = clean_id(df_assort['external_id'])
                 df_images['external_id'] = clean_id(df_images['external_id'])
+                # Suppression des doublons dans les images
                 df_images = df_images.drop_duplicates(subset=['external_id'])
                 
                 # Ne garder que l'ID et l'image pour la fusion
@@ -74,12 +87,11 @@ if df_assort is not None and menulist_file:
     if st.sidebar.button("Lancer la correspondance 🚀"):
         with st.spinner('Traitement des données en cours...'):
             try:
-                # Lecture MenuList pour récupérer la structure et les food_id
+                # Lecture MenuList
                 df_menu = pd.read_csv(menulist_file, sep=';', dtype=str)
                 menu_columns = df_menu.columns.tolist() # Sauvegarde des entêtes exactes
                 
                 if 'external_id' in df_assort.columns and 'external_id' in df_menu.columns:
-                    df_assort['external_id'] = clean_id(df_assort['external_id'])
                     df_menu['external_id'] = clean_id(df_menu['external_id'])
                     
                     # Filtrage Store
@@ -88,7 +100,7 @@ if df_assort is not None and menulist_file:
                     else:
                         df_assort_filtered = df_assort.copy()
                     
-                    # Jointure avec MenuList pour récupérer le food_id
+                    # Jointure avec MenuList
                     menu_subset = df_menu[['external_id', 'food_id']].drop_duplicates(subset=['external_id'])
                     merged = pd.merge(df_assort_filtered, menu_subset, on='external_id', how='left')
                     
@@ -114,19 +126,33 @@ if df_assort is not None and menulist_file:
                             if 'price' in df_pricing.columns: cols_to_keep.append('price')
                             if 'quantity' in df_pricing.columns: cols_to_keep.append('quantity')
                             
+                            # Suppression des doublons dans le fichier de prix
                             pricing_subset = df_pricing[cols_to_keep].drop_duplicates(subset=['product_id'])
                             
                             non_existing_products = pd.merge(non_existing_products, pricing_subset, left_on='external_id', right_on='product_id', how='left')
+                            
+                            # 🔴 SUPPRESSION DES LIGNES SANS PRIX DANS L'OUTPUT 2 🔴
+                            if 'price' in non_existing_products.columns:
+                                # Supprime les NaN, les Nulls et les chaînes vides
+                                non_existing_products['price'] = non_existing_products['price'].replace('', np.nan)
+                                non_existing_products = non_existing_products.dropna(subset=['price'])
 
                     # --- FORMATAGE FINAL SELON LE MODÈLE MENULIST ---
                     def format_like_menulist(df, target_columns):
-                        """Crée un dataframe vide avec les bonnes colonnes et le remplit avec nos données"""
+                        """Crée un dataframe avec les bonnes colonnes et le remplit."""
                         df_out = pd.DataFrame(columns=target_columns)
                         for col in target_columns:
                             if col in df.columns:
                                 df_out[col] = df[col]
-                        # Remplir les valeurs NaN par des chaînes vides pour faire plus propre
-                        return df_out.fillna('')
+                        
+                        # Remplir les valeurs NaN par des chaînes vides
+                        df_out = df_out.fillna('')
+                        
+                        # Ultime sécurité anti-doublon sur l'output final
+                        if 'external_id' in df_out.columns:
+                            df_out = df_out.drop_duplicates(subset=['external_id'])
+                            
+                        return df_out
 
                     output1_final = format_like_menulist(existing_products, menu_columns)
                     output2_final = format_like_menulist(non_existing_products, menu_columns)
@@ -147,7 +173,7 @@ if df_assort is not None and menulist_file:
                         )
                     
                     with tab2:
-                        st.subheader(f"Produits manquants ({len(output2_final)} articles)")
+                        st.subheader(f"Produits manquants avec Prix ({len(output2_final)} articles)")
                         st.dataframe(output2_final, use_container_width=True)
                         st.download_button(
                             label="📥 Télécharger Output 2 (CSV)",
