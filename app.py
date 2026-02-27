@@ -3,14 +3,13 @@ import pandas as pd
 
 st.set_page_config(page_title="Assortiment vs MenuList Matcher", layout="wide")
 
-st.title("📦 Assortiment vs MenuList Matcher (avec Images & Prix)")
-st.markdown("Identifiez les produits existants et manquants. Les photos (issues de la feuille Images) et les prix/quantités seront intégrés dans les exports.")
+st.title("📦 Assortiment vs MenuList Matcher")
+st.markdown("Fichiers de sortie formatés exactement comme le modèle **MenuList**. Les images sont récupérées depuis la 2ème feuille de l'Assortiment.")
 
 # --- BARRE LATÉRALE : UPLOADS ---
 st.sidebar.header("1. Upload des Fichiers")
-assortiment_file = st.sidebar.file_uploader("1️⃣ Fichier Assortiment (Catalogue - CSV ou Excel)", type=['csv', 'xlsx'])
-images_file = st.sidebar.file_uploader("🖼️ Fichier Images (Optionnel si Excel global)", type=['csv', 'xlsx'], help="Uploadez le CSV contenant les images, ou laissez vide si elles sont dans une feuille 'Images' de l'Excel ci-dessus.")
-menulist_file = st.sidebar.file_uploader("2️⃣ Fichier MenuList (CSV)", type=['csv'])
+assortiment_file = st.sidebar.file_uploader("1️⃣ Fichier Assortiment (Excel avec 2 feuilles : Catalogue et Images)", type=['xlsx'])
+menulist_file = st.sidebar.file_uploader("2️⃣ Fichier MenuList (CSV modèle)", type=['csv'])
 pricing_file = st.sidebar.file_uploader("3️⃣ Fichier Prix & Quantités (Ex: invalid_rows.csv)", type=['csv'])
 
 # Variables globales
@@ -19,53 +18,42 @@ df_images = None
 store_col = None
 store_filter = None
 
-# Fonction utilitaire pour nettoyer l'ID
 def clean_id(serie):
+    """Nettoie les IDs pour assurer une correspondance parfaite."""
     return serie.astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-
-# Fonction pour trouver la colonne image
-def find_image_column(df):
-    for col in df.columns:
-        if 'image' in col.lower() or 'photo' in col.lower() or 'url' in col.lower():
-            return col
-    return None
 
 # --- ÉTAPE 1 : LECTURE DE L'ASSORTIMENT & IMAGES ---
 if assortiment_file:
     try:
-        # Lecture du catalogue
-        if assortiment_file.name.endswith('.csv'):
-            df_assort = pd.read_csv(assortiment_file)
-        else:
-            # Excel : on lit la première feuille par défaut
-            df_assort = pd.read_excel(assortiment_file, sheet_name=0)
+        # Lecture de la 1ère feuille (Catalogue)
+        df_assort = pd.read_excel(assortiment_file, sheet_name=0)
+        
+        # Lecture de la 2ème feuille (Images)
+        try:
+            df_images = pd.read_excel(assortiment_file, sheet_name=1)
+            st.sidebar.success("✅ 2ème feuille (Images) lue avec succès.")
             
-            # Si aucun fichier image séparé n'est uploadé, on tente de lire l'onglet "Images" dans l'Excel
-            if not images_file:
-                xls = pd.ExcelFile(assortiment_file)
-                # Cherche une feuille qui s'appelle 'Images' (insensible à la casse)
-                sheet_img = next((sheet for sheet in xls.sheet_names if 'image' in sheet.lower()), None)
-                if sheet_img:
-                    df_images = pd.read_excel(assortiment_file, sheet_name=sheet_img)
-                    st.sidebar.success(f"Onglet images détecté : '{sheet_img}'")
+            # Renommer la colonne d'ID de la feuille image s'il s'agit de 'internal code'
+            id_col_img = next((col for col in df_images.columns if 'internal' in col.lower() or 'external_id' in col.lower()), None)
+            if id_col_img and id_col_img != 'external_id':
+                df_images = df_images.rename(columns={id_col_img: 'external_id'})
+                
+            # Trouver la colonne d'image
+            img_col = next((col for col in df_images.columns if 'image' in col.lower() or 'photo' in col.lower() or 'url' in col.lower()), None)
+            if img_col and img_col != 'image':
+                df_images = df_images.rename(columns={img_col: 'image'})
 
-        # Lecture du fichier images s'il est uploadé séparément (CSV)
-        if images_file:
-            if images_file.name.endswith('.csv'):
-                df_images = pd.read_csv(images_file)
-            else:
-                df_images = pd.read_excel(images_file)
-            st.sidebar.success("Fichier Images chargé avec succès.")
-
-        # Fusion Catalogue + Images sur external_id
-        if df_images is not None and 'external_id' in df_assort.columns and 'external_id' in df_images.columns:
-            df_assort['external_id'] = clean_id(df_assort['external_id'])
-            df_images['external_id'] = clean_id(df_images['external_id'])
-            # On supprime les doublons potentiels dans les images pour éviter de dédoubler les lignes
-            df_images = df_images.drop_duplicates(subset=['external_id'])
-            
-            # Jointure (ajoute la colonne image au catalogue, en gardant son en-tête intacte)
-            df_assort = pd.merge(df_assort, df_images, on='external_id', how='left')
+            # Nettoyer et fusionner
+            if 'external_id' in df_assort.columns and 'external_id' in df_images.columns:
+                df_assort['external_id'] = clean_id(df_assort['external_id'])
+                df_images['external_id'] = clean_id(df_images['external_id'])
+                df_images = df_images.drop_duplicates(subset=['external_id'])
+                
+                # Ne garder que l'ID et l'image pour la fusion
+                if 'image' in df_images.columns:
+                    df_assort = pd.merge(df_assort, df_images[['external_id', 'image']], on='external_id', how='left')
+        except Exception as e:
+            st.sidebar.warning(f"Impossible de lire la 2ème feuille (Images) : {e}")
 
         # Cherche la colonne store
         store_col = next((col for col in df_assort.columns if 'store' in col.lower() or 'magasin' in col.lower()), None)
@@ -81,26 +69,26 @@ if assortiment_file:
     except Exception as e:
         st.sidebar.error(f"Erreur lors de la lecture de l'assortiment : {e}")
 
-# --- ÉTAPE 2 : TRAITEMENT MENULIST & PRICING ---
+# --- ÉTAPE 2 : TRAITEMENT ---
 if df_assort is not None and menulist_file:
     if st.sidebar.button("Lancer la correspondance 🚀"):
         with st.spinner('Traitement des données en cours...'):
             try:
-                # Lecture MenuList
+                # Lecture MenuList pour récupérer la structure et les food_id
                 df_menu = pd.read_csv(menulist_file, sep=';', dtype=str)
+                menu_columns = df_menu.columns.tolist() # Sauvegarde des entêtes exactes
                 
                 if 'external_id' in df_assort.columns and 'external_id' in df_menu.columns:
-                    # Nettoyage
                     df_assort['external_id'] = clean_id(df_assort['external_id'])
                     df_menu['external_id'] = clean_id(df_menu['external_id'])
                     
-                    # Filtrage Store (si colonne présente)
+                    # Filtrage Store
                     if store_col:
-                        df_assort_filtered = df_assort[df_assort[store_col].astype(str).str.replace(r'\.0$', '', regex=True) == str(store_filter)]
+                        df_assort_filtered = df_assort[df_assort[store_col].astype(str).str.replace(r'\.0$', '', regex=True) == str(store_filter)].copy()
                     else:
-                        df_assort_filtered = df_assort
+                        df_assort_filtered = df_assort.copy()
                     
-                    # Jointure avec la MenuList (pour récupérer le food_id)
+                    # Jointure avec MenuList pour récupérer le food_id
                     menu_subset = df_menu[['external_id', 'food_id']].drop_duplicates(subset=['external_id'])
                     merged = pd.merge(df_assort_filtered, menu_subset, on='external_id', how='left')
                     
@@ -108,58 +96,67 @@ if df_assort is not None and menulist_file:
                     existing_products = merged[merged['food_id'].notna()].copy()
                     non_existing_products = merged[merged['food_id'].isna()].copy()
                     
-                    # --- Étape 3 : Enrichissement Prix & Quantités (Fichier invalid_rows) ---
+                    # --- Enrichissement Prix & Quantités (pour non-existants) ---
                     if pricing_file is not None:
                         df_pricing = pd.read_csv(pricing_file)
                         if 'product_id' in df_pricing.columns:
                             df_pricing['product_id'] = clean_id(df_pricing['product_id'])
                             
-                            # Filtre magasin
                             if 'store_id' in df_pricing.columns and store_filter:
                                 df_pricing = df_pricing[df_pricing['store_id'].astype(str).str.replace(r'\.0$', '', regex=True) == str(store_filter)]
                             
+                            # On renomme 'stock' en 'quantity' pour correspondre au format MenuList
+                            rename_dict = {}
+                            if 'stock' in df_pricing.columns: rename_dict['stock'] = 'quantity'
+                            if rename_dict: df_pricing = df_pricing.rename(columns=rename_dict)
+                            
                             cols_to_keep = ['product_id']
                             if 'price' in df_pricing.columns: cols_to_keep.append('price')
-                            if 'stock' in df_pricing.columns: cols_to_keep.append('stock')
+                            if 'quantity' in df_pricing.columns: cols_to_keep.append('quantity')
                             
                             pricing_subset = df_pricing[cols_to_keep].drop_duplicates(subset=['product_id'])
                             
-                            # On ajoute prix et stock aux produits NON-existants
                             non_existing_products = pd.merge(non_existing_products, pricing_subset, left_on='external_id', right_on='product_id', how='left')
-                            if 'product_id' in non_existing_products.columns:
-                                non_existing_products = non_existing_products.drop(columns=['product_id'])
-                    
-                    # --- Configuration de l'affichage Web (optionnel, pour faire joli) ---
-                    img_col_name = find_image_column(existing_products)
-                    config_existing = {img_col_name: st.column_config.ImageColumn("Aperçu (Image)")} if img_col_name else {}
-                    config_non_existing = {img_col_name: st.column_config.ImageColumn("Aperçu (Image)")} if img_col_name else {}
 
-                    # --- AFFICHAGE ET EXPORT ---
+                    # --- FORMATAGE FINAL SELON LE MODÈLE MENULIST ---
+                    def format_like_menulist(df, target_columns):
+                        """Crée un dataframe vide avec les bonnes colonnes et le remplit avec nos données"""
+                        df_out = pd.DataFrame(columns=target_columns)
+                        for col in target_columns:
+                            if col in df.columns:
+                                df_out[col] = df[col]
+                        # Remplir les valeurs NaN par des chaînes vides pour faire plus propre
+                        return df_out.fillna('')
+
+                    output1_final = format_like_menulist(existing_products, menu_columns)
+                    output2_final = format_like_menulist(non_existing_products, menu_columns)
+
+                    # --- AFFICHAGE ---
                     st.success(f"✅ Traitement terminé pour le Store ID : {store_filter}")
                     
-                    tab1, tab2 = st.tabs(["✅ Produits Existants", "❌ Produits Non-Existants (Magasin 170)"])
+                    tab1, tab2 = st.tabs(["✅ Output 1 (Existants)", "❌ Output 2 (Non-Existants)"])
                     
                     with tab1:
-                        st.subheader(f"Produits trouvés ({len(existing_products)} articles)")
-                        st.dataframe(existing_products, use_container_width=True, column_config=config_existing)
+                        st.subheader(f"Produits existants ({len(output1_final)} articles)")
+                        st.dataframe(output1_final, use_container_width=True)
                         st.download_button(
-                            label="📥 Télécharger Produits Existants (CSV)",
-                            data=existing_products.to_csv(index=False).encode('utf-8-sig'),
+                            label="📥 Télécharger Output 1 (CSV)",
+                            data=output1_final.to_csv(index=False, sep=';').encode('utf-8-sig'),
                             file_name=f"Output1_Existing_Products.csv",
                             mime="text/csv"
                         )
                     
                     with tab2:
-                        st.subheader(f"Produits manquants ({len(non_existing_products)} articles)")
-                        st.dataframe(non_existing_products, use_container_width=True, column_config=config_non_existing)
+                        st.subheader(f"Produits manquants ({len(output2_final)} articles)")
+                        st.dataframe(output2_final, use_container_width=True)
                         st.download_button(
-                            label=f"📥 Télécharger Produits Non-Existants (CSV)",
-                            data=non_existing_products.to_csv(index=False).encode('utf-8-sig'),
+                            label="📥 Télécharger Output 2 (CSV)",
+                            data=output2_final.to_csv(index=False, sep=';').encode('utf-8-sig'),
                             file_name=f"Output2_NonExisting_Store_{store_filter}.csv",
                             mime="text/csv"
                         )
                 else:
-                    st.error("🚨 Erreur : Les fichiers Catalogue, Images et MenuList doivent tous contenir la colonne `external_id`.")
+                    st.error("🚨 Erreur : La colonne `external_id` est introuvable.")
                     
             except Exception as e:
                 st.error(f"Une erreur s'est produite : {e}")
